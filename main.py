@@ -47,6 +47,11 @@ def main(args):
 
     data_loader, class_mask = build_continual_dataloader(args)
     
+    print(f"Number of tasks: {len(data_loader)}")
+    for i, task in enumerate(data_loader):
+        n_samples = len(task['train'].dataset)
+        print(f"Task {i}: {n_samples} training samples")
+
     print(f"Creating original model: {args.model}")
     original_model = create_model(
         args.model,

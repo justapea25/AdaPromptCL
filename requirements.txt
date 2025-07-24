@@ -1,0 +1,9 @@
+torch
+torchvision
+timm==0.8.0.dev0
+importlib_metadata
+clip
+git+https://github.com/openai/CLIP.git
+kornia
+scikit-learn
+pytorch-metric-learning
