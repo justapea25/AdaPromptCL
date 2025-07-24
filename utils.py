@@ -246,3 +246,30 @@ def init_distributed_mode(args):
                                         #  world_size=args.world_size, rank=args.rank)
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
+
+
+def accuracy_binary(output, target, topk=(1,)):
+    """Binary accuracy for deepfake detection (0=real, 1=fake)"""
+    with torch.no_grad():
+        batch_size = target.size(0)
+        num_classes = output.size(1)
+        
+        # Ensure we don't request more top-k than available classes
+        maxk = min(max(topk), num_classes)
+        
+        # Get predictions (class with highest probability)
+        pred = output.argmax(dim=1)
+        
+        # For deepfake: both pred and target are already 0/1
+        correct = pred.eq(target)
+        
+        res = []
+        for k in topk:
+            if k <= num_classes:
+                correct_k = correct.float().sum(0, keepdim=True)
+                res.append(correct_k.mul_(100.0 / batch_size))
+            else:
+                # If k > num_classes, just return the same accuracy
+                correct_k = correct.float().sum(0, keepdim=True)
+                res.append(correct_k.mul_(100.0 / batch_size))
+        return res

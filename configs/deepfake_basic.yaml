@@ -1,0 +1,40 @@
+# yaml_configs/deepfake_test.yaml
+experiment_name: "deepfake_test"
+dataset: "deepfake"
+data_path: "/home/hoangminhdau/work/Working/DynaCon/data/processed/CDDB/"
+output_dir: "./output/deepfake_test"
+
+# Dataset Configuration
+deepfake_tasks: ["gaugan", "biggan"]
+num_tasks: 2
+shuffle: false
+
+# Model Configuration
+model: "vit_base_patch16_224"
+input_size: 224
+pretrained: true
+
+# Training Configuration  
+batch_size: 16
+epochs: 2
+lr: 0.001
+
+# Continual Learning
+train_mask: false
+task_inc: true
+
+# CRITICAL: Enable binary classification evaluation
+binary_classification: true
+
+# E-Prompt Configuration
+use_e_prompt: true
+e_prompt_layer_idx: [0, 1, 2]
+prompt_pool: true
+size: 50
+length: 3
+top_k: 3
+
+# System Configuration
+device: "cuda"
+seed: 42
+print_freq: 5

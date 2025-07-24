@@ -16,6 +16,7 @@ from torchvision import datasets, transforms
 from timm.data import create_transform
 
 from continual_datasets.continual_datasets import *
+from continual_datasets.deepfake_dataset import DeepfakeDataset
 
 import utils
 from copy import deepcopy
@@ -47,13 +48,19 @@ def build_continual_dataloader(args):
     else:
         if args.dataset == '5-datasets':
             dataset_list = ['SVHN', 'MNIST', 'CIFAR10', 'NotMNIST', 'FashionMNIST']
-        if args.dataset in ['vtab-1k', 'overlapping-vtab-1k']:
+        elif args.dataset in ['vtab-1k', 'overlapping-vtab-1k']:
             vtab_path = args.data_path # 
             dataset_list = os.listdir(vtab_path)
             print(dataset_list)
             if len(args.vtab_datasets) > 0 :
                 dataset_list = args.vtab_datasets
-                
+        elif args.dataset.startswith('deepfake'):
+            args.nb_classes = 2  # FIXED: Always 2 classes for binary classification
+            args.task_inc = True  # FIXED: Use task incremental (domain incremental)
+            args.train_mask = True  # Enable task-specific training
+            args.binary_classification = True
+            # Use deepfake tasks from config
+            dataset_list = getattr(args, 'deepfake_tasks', ['gaugan', 'biggan', 'stylegan', 'stargan'])
         else:
             dataset_list = args.dataset.split(',')
         
@@ -436,6 +443,25 @@ def get_dataset(dataset, transform_train, transform_val, args,):
         dataset_train = Imagenet_R(args.data_path, train=True, download=True, transform=transform_train,
                 noisy_labels=args.noisy_labels).data
         dataset_val = Imagenet_R(args.data_path, train=False, download=True, transform=transform_val).data
+    
+    # Add deepfake dataset support
+    elif dataset in getattr(args, 'deepfake_tasks', []) or dataset == 'deepfake':
+        # For deepfake datasets, create custom dataset instances
+        task_id = getattr(args, 'deepfake_tasks', ['deepfake']).index(dataset) if hasattr(args, 'deepfake_tasks') else 0
+        dataset_train = DeepfakeDataset(
+            root=args.data_path,
+            task_name=dataset,
+            task_id=task_id,
+            train=True,
+            transform=transform_train
+        )
+        dataset_val = DeepfakeDataset(
+            root=args.data_path,
+            task_name=dataset,
+            task_id=task_id,
+            train=False,
+            transform=transform_val
+        )
     
     else:
         raise ValueError('Dataset {} not found.'.format(dataset))

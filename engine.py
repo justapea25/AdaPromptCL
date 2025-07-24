@@ -41,6 +41,8 @@ from sklearn.metrics import silhouette_score # silhouette_samples
 from sklearn.cluster import KMeans
 import networkx as net
 
+from utils import accuracy_binary
+
 
 
 def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module, 
@@ -112,27 +114,16 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
             logits = output['logits'] 
             # (bs,D) D=512 if clip-text-encoder head; D=#classes otherwise
             
-            with torch.cuda.amp.autocast():
-                if (args.train_mask) and (class_mask is not None) and \
-                    (not args.clip_text_head) and (not args.blurryCL) and (not args.online_cls_mask): 
-                    mask = class_mask[task_id] # why disj setup is currently not working for sep_specialization
-                    not_mask = np.setdiff1d(np.arange(args.nb_classes), mask)
-                    not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
-                    logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
-
-                if args.blurryCL or args.online_cls_mask : # or args.milder_vtab:
-                    exp_classes = torch.unique(target, sorted=True)
-                    nonexp_classes = np.setdiff1d(np.arange(args.nb_classes), exp_classes.cpu().numpy() )
-                    nonexp_classes = torch.tensor(nonexp_classes, dtype=torch.int64).to(device)
-                    logits = logits.index_fill(dim=1, index=nonexp_classes, value=float('-inf'))
-                    
-                loss = criterion(logits, target) # base criterion (CrossEntropyLoss) or BCE
-                # print('logits', logits[torch.arange(target.size(0)), target.squeeze()])
-                
-                    
-                if args.pull_constraint and 'reduce_sim' in output: # if not (feat_prompt or coda_prompt)
-                    loss = loss - args.pull_constraint_coeff * output['reduce_sim']
-                
+            # Remove the class masking code we added - not needed for domain incremental
+            # Just use regular loss calculation:
+            loss = criterion(logits, target)                 
+            if args.pull_constraint and 'reduce_sim' in output: # if not (feat_prompt or coda_prompt)
+                loss = loss - args.pull_constraint_coeff * output['reduce_sim']
+            
+            # FIXED: Use binary accuracy for deepfake datasets
+            if getattr(args, 'binary_classification', False):
+                acc1, acc5 = accuracy_binary(logits, target, topk=(1, 5))
+            else:
                 acc1, acc5 = accuracy(logits, target, topk=(1, 5))
 
             if not math.isfinite(loss.item()):
@@ -198,34 +189,39 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
     target_set = set()
 
     taskid_correct, total = 0, 0
+    # Add binary accuracy tracking
+    binary_correct, binary_total = 0, 0
+    
     with torch.no_grad():
         for input, target in metric_logger.log_every(data_loader, args.print_freq, header):
             input = input.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
 
             # compute output
-
             if original_model is not None:
                 output = original_model(input)
                 cls_features = output['pre_logits']
             else:
                 cls_features = None
             
-            
             clip_emb = None
             output = model(input, task_id=task_id, cls_features=cls_features, clip_emb=clip_emb,)
             logits = output['logits']
 
-
-            if args.task_inc and class_mask is not None:
-                #adding mask to output logits
-                mask = class_mask[task_id]
-                logits_mask = torch.ones_like(logits, device=device) * float('-inf')
-                logits_mask = logits_mask.index_fill(1, mask, 0.0)
-                logits = logits + logits_mask
-
+            # Remove the class masking code we added - not needed for domain incremental
+            # Just use regular loss calculation:
             loss = criterion(logits, target)
-            acc1, acc5 = accuracy(logits, target, topk=(1, 5))
+            
+            # ADDED: Use binary accuracy for deepfake datasets
+            if hasattr(args, 'binary_classification') and args.binary_classification:
+                acc1, acc5 = accuracy_binary(logits, target, topk=(1, 5))
+                
+                # Track binary accuracy
+                pred = torch.argmax(logits, dim=1)
+                binary_correct += ((pred % 2) == (target % 2)).sum().item()
+                binary_total += target.size(0)
+            else:
+                acc1, acc5 = accuracy(logits, target, topk=(1, 5))
 
             # to compute recency 
             cls_inds, cls_cnts = torch.unique(torch.argmax(logits, dim=1), return_counts=True) 
@@ -246,9 +242,6 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
                 taskid_correct += torch.sum(prompt_idx == task_id).item()
 
             total += target.size(0)
-            # print('taskid_correct: ', taskid_correct, total)
-            # task_id
-
 
             metric_logger.meters['Loss'].update(loss.item())
             metric_logger.meters['Acc@1'].update(acc1.item(), n=input.shape[0])
@@ -269,6 +262,12 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
     for cls_id, correct_cnt in classid2acc.items():
         classid2acc[cls_id] = (correct_cnt/classid2cnt[cls_id]).item()
 
+    # ADD: Print binary accuracy for deepfake datasets
+    if hasattr(args, 'binary_classification') and args.binary_classification and binary_total > 0:
+        binary_acc = 100.0 * binary_correct / binary_total
+        print(f'* Binary Classification Accuracy: {binary_acc:.3f}%')
+        test_stats['binary_acc'] = binary_acc
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
@@ -278,7 +277,6 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
     test_stats['taskid_pred_acc'] = taskid_pred_acc
     test_stats['classid2acc'] = dict(classid2acc)
     test_stats['task2acc'] = np.array(list(classid2acc.values())).mean()
-
 
     return test_stats
 
