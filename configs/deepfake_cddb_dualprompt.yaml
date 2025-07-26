@@ -1,0 +1,162 @@
+# CDDB Deepfake Dataset Configuration for AdaPromptCL
+experiment:
+  name: "deepfake_cddb_dualprompt"
+  output_dir: "./output/deepfake_cddb"
+  seed: 42
+
+# Dataset Configuration
+dataset:
+  type: "deepfake"
+  data_path: "/home/hoangminhdau/work/Working/DynaCon/data/processed/CDDB/"
+  task_names: 
+    - "gaugan"
+    - "biggan" 
+  dataset: "deepfake-continual"  # Used by clip_text_head
+
+# Model Configuration  
+model:
+  name: "vit_base_patch16_224"
+  input_size: 224
+  pretrained: true
+  drop: 0.0
+  drop_path: 0.0
+
+# Training Configuration
+training:
+  batch_size: 32
+  epochs: 2
+  num_workers: 4
+  pin_mem: true
+  
+# Optimizer Configuration (FIXED TYPES)
+optimizer:
+  type: "adam"
+  lr: 0.03
+  weight_decay: 0.0
+  eps: 0.00000001          # 1e-8 as decimal to avoid string parsing
+  betas: [0.9, 0.999]
+  clip_grad: 1.0
+  momentum: 0.9
+  reinit_optimizer: true
+
+# Scheduler Configuration
+scheduler:
+  type: "constant"
+  warmup_epochs: 2
+  decay_epochs: 30
+  min_lr: 0.00001          # 1e-5 as decimal
+  warmup_lr: 0.000001      # 1e-6 as decimal
+  decay_rate: 0.1
+  scale_lr: true
+
+# Continual Learning Configuration
+continual_learning:
+  task_inc: false
+  train_mask: false
+
+# DualPrompt Configuration
+prompt:
+  # Core prompt settings
+  prompt_pool: true
+  size: 10              # pool_size
+  length: 8             # prompt_length  
+  top_k: 1
+  batchwise_prompt: true
+  prompt_momentum: 0.01
+  
+  # Prompt initialization and keys
+  prompt_key: true
+  prompt_key_init: "uniform"
+  initializer: "uniform"
+  embedding_key: "cls"
+  predefined_key: ""
+  
+  # Prompt constraints and masks
+  use_prompt_mask: true
+  mask_first_epoch: false
+  pull_constraint: true
+  pull_constraint_coeff: 1.0
+  same_key_value: false
+  
+  # Sharing settings
+  shared_prompt_pool: false
+  shared_prompt_key: false
+  shared_mean: false
+  
+  # Advanced prompt features (set to defaults)
+  use_g_prompt: false
+  g_prompt_length: 1
+  g_prompt_layer_idx: [0]
+  use_prefix_tune_for_g_prompt: false
+  use_e_prompt: false
+  e_prompt_layer_idx: [0]
+  use_prefix_tune_for_e_prompt: false
+  
+  # Other prompt types (disabled for DualPrompt)
+  coda_prompt: false
+  num_coda_prompt: 10
+  feat_prompt: false
+  num_feat_prompt: 100
+  orthogonal_coeff: 1.0
+  softmax_prompt: false
+  
+  # Advanced features (disabled)
+  keep_prompt_freq: false
+  feat_attn_mask: false
+  copy_top2bottom: false
+  task_free: false
+  copy_thrh: 0.05
+  pct_copy: 0.1
+  compress_ratio: 1
+  top_ratio: 1.0
+
+# Model head and evaluation settings
+model_advanced:
+  head_type: "token"
+  eval_prototype_clf: false
+  
+  # CLIP-related settings
+  clip_text_head: false
+  clip_emb: false
+  
+  # Task-specific settings
+  task_agnostic_head: false
+  sep_specialization: false
+  eval_known_prompt: false
+  
+  # Model EMA settings
+  model_ema: false
+  model_ema_decay: 0.9999
+  model_ema_force_cpu: false
+  
+  # Other model settings
+  pt_augmented_ptm: false
+  freeze: []
+  
+  # Attention and visualization
+  save_attn_scores: false
+  save_attn_period: 2
+  
+  # Freezing options
+  freezeQ: false
+  freezeV: false
+  freezeK: false
+  
+# Data Augmentation
+augmentation:
+  smoothing: 0.1
+  train_interpolation: "bicubic"
+  reprob: 0.0
+  remode: "pixel" 
+  recount: 1
+
+# System Configuration
+system:
+  device: "cuda"
+  distributed: false
+  world_size: 1
+  rank: 0
+  local_rank: 0
+  dist_backend: "nccl"
+  dist_url: "env://"
+  gpu: 0 
