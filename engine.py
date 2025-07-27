@@ -581,18 +581,19 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
                     #### recover clf-head's param after warmup ####
                     if task_id >0:
                         with torch.no_grad():
-                            # num_same = torch.all(model.module.head.weight==temp_head_params['head.weight'], dim=1).sum()
+                            model_ref = get_model_ref(model, args)
+                            # num_same = torch.all(model_ref.head.weight==temp_head_params['head.weight'], dim=1).sum()
                             # print('before recover, num_same', num_same)
-                            model.module.head.weight.data = temp_head_params['head.weight']
-                            model.module.head.bias.data = temp_head_params['head.bias']
-                            # num_same = torch.all(model.module.head.weight==temp_head_params['head.weight'], dim=1).sum()
+                            model_ref.head.weight.data = temp_head_params['head.weight']
+                            model_ref.head.bias.data = temp_head_params['head.bias']
+                            # num_same = torch.all(model_ref.head.weight==temp_head_params['head.weight'], dim=1).sum()
                             # print('after recover, num_same', num_same)
                                                     
                         optimizer = create_optimizer(args, model)
                         
                         ##### reinit temp_head_params #####
                         temp_head_params = dict()
-                        for n, p in model.module.named_parameters():
+                        for n, p in model_ref.named_parameters():
                             if n.startswith('head'): 
                                 temp_head_params[n] = deepcopy(p.detach()) # (#classes,D=768)
                         
@@ -602,8 +603,9 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
                 if args.reinit_clf and (epoch==(left_epochs+args.evolve_epoch-10) or epoch==(num_of_epochs-10-1)) : # 99 <- 100-1
                     
                     
-                    model.module.head.weight.data = temp_head_params['head.weight']
-                    model.module.head.bias.data = temp_head_params['head.bias']
+                    model_ref = get_model_ref(model, args)
+                    model_ref.head.weight.data = temp_head_params['head.weight']
+                    model_ref.head.bias.data = temp_head_params['head.bias']
                    
                     # reinit optim
                     optimizer = create_optimizer(args, model)
@@ -707,11 +709,14 @@ def evolve_prompts(model, original_model, task_id, converge_hist, args):
     4. merge
     """
     from torchmetrics.functional import pairwise_cosine_similarity
-
+    
+    # Add this helper
+    prompt_ref = get_prompt_ref(model, args)
+    
     if task_id > 0:
         with torch.no_grad():    
             # 1. get similarity between prompts
-            prompts = model.module.e_prompt.prompt if args.distributed else model.e_prompt.prompt
+            prompts = prompt_ref.prompt
             _, _, num_tasks, _, _, _ = prompts.size() # num_layer, dual, num_tasks, length, heads, emb
             prompts = prompts.mean(0).mean(0).mean(1).view(num_tasks, -1)[:task_id+1] # including itself
             sim = pairwise_cosine_similarity( prompts ) # (task_id+1, task_id+1)
@@ -719,7 +724,7 @@ def evolve_prompts(model, original_model, task_id, converge_hist, args):
             print('similarity', sim)
             
             # 2. decision: by threshold
-            converged_p = model.module.e_prompt.converged_p if args.distributed else model.e_prompt.converged_p
+            converged_p = prompt_ref.converged_p
             
             # if directional, ignore the converged prompts
             if (not args.bidirectional) and (converged_p is not None):
@@ -746,8 +751,8 @@ def evolve_prompts(model, original_model, task_id, converge_hist, args):
             if (args.bidirectional) and (similar_tf.sum() > 0): # Bi-Directional
                 # compress all similar prompts
                 prompt_p_ids = (slice(None),slice(None),similar_prompt_ids)
-                cprs_prev_prompts = model.module.e_prompt.prompt[prompt_p_ids]
-                cprs_prev_keys = model.module.e_prompt.prompt_key[similar_prompt_ids]
+                cprs_prev_prompts = prompt_ref.prompt[prompt_p_ids]
+                cprs_prev_keys = prompt_ref.prompt_key[similar_prompt_ids]
                 print('cprs_prevs', cprs_prev_prompts.size(), cprs_prev_keys.size())
                 
                 if args.normalize_by_sim: # compressing based on similarity
@@ -763,54 +768,54 @@ def evolve_prompts(model, original_model, task_id, converge_hist, args):
                 prompt_curr_ind = (slice(None),slice(None),[task_id])
                 
                 print('cprs_prevs', cprs_prev_prompts.size(), cprs_prev_keys.size())
-                print('curr', model.module.e_prompt.prompt[prompt_curr_ind].size(), model.module.e_prompt.prompt_key[[task_id]].size())
+                print('curr', prompt_ref.prompt[prompt_curr_ind].size(), prompt_ref.prompt_key[[task_id]].size())
 
                 # mix prompts: curr -> prev
                 for i, p_id in enumerate(similar_prompt_ids):
                     prompt_p_id = (slice(None),slice(None),[p_id])
-                    model.module.e_prompt.prompt.grad.zero_()
-                    model.module.e_prompt.prompt[prompt_p_id] = (bwd_ratio[i])*model.module.e_prompt.prompt[prompt_curr_ind] +\
-                                        (1-bwd_ratio[i])*model.module.e_prompt.prompt[prompt_p_id]
+                    prompt_ref.prompt.grad.zero_()
+                    prompt_ref.prompt[prompt_p_id] = (bwd_ratio[i])*prompt_ref.prompt[prompt_curr_ind] +\
+                                        (1-bwd_ratio[i])*prompt_ref.prompt[prompt_p_id]
                     # mix keys
-                    model.module.e_prompt.prompt_key.grad.zero_()
-                    model.module.e_prompt.prompt_key[[p_id]] = (bwd_ratio[i])*model.module.e_prompt.prompt_key[[task_id]] +\
-                                        (1-bwd_ratio[i])*model.module.e_prompt.prompt_key[[p_id]]
+                    prompt_ref.prompt_key.grad.zero_()
+                    prompt_ref.prompt_key[[p_id]] = (bwd_ratio[i])*prompt_ref.prompt_key[[task_id]] +\
+                                        (1-bwd_ratio[i])*prompt_ref.prompt_key[[p_id]]
 
                 # mix prompts: cprs -> curr
-                model.module.e_prompt.prompt.grad.zero_()
-                model.module.e_prompt.prompt[prompt_curr_ind] = (fwd_ratio)*cprs_prev_prompts +\
-                                    (1-fwd_ratio)*model.module.e_prompt.prompt[prompt_curr_ind]
+                prompt_ref.prompt.grad.zero_()
+                prompt_ref.prompt[prompt_curr_ind] = (fwd_ratio)*cprs_prev_prompts +\
+                                    (1-fwd_ratio)*prompt_ref.prompt[prompt_curr_ind]
                 # mix keys
-                model.module.e_prompt.prompt_key.grad.zero_()
-                model.module.e_prompt.prompt_key[[task_id]] = (fwd_ratio)*cprs_prev_keys +\
-                                    (1-fwd_ratio)*model.module.e_prompt.prompt_key[[task_id]]
+                prompt_ref.prompt_key.grad.zero_()
+                prompt_ref.prompt_key[[task_id]] = (fwd_ratio)*cprs_prev_keys +\
+                                    (1-fwd_ratio)*prompt_ref.prompt_key[[task_id]]
                 
             else: # Directional: Converge current_prompt to similar_prompts 
                 # add current_prompt to converged_p
                 if (similar_tf).sum() > 0 :
                     if converged_p is None:
                         if args.distributed:
-                            model.module.e_prompt.converged_p = torch.tensor([task_id])
+                            prompt_ref.converged_p = torch.tensor([task_id])
                         else:
-                            model.e_prompt.converged_p = torch.tensor([task_id])
+                            prompt_ref.converged_p = torch.tensor([task_id])
                     else:
                         if args.distributed:
-                            model.module.e_prompt.converged_p = torch.cat([converged_p, torch.tensor([task_id])])
+                            prompt_ref.converged_p = torch.cat([converged_p, torch.tensor([task_id])])
                         else:
-                            model.e_prompt.converged_p = torch.cat([converged_p, torch.tensor([task_id])])
+                            prompt_ref.converged_p = torch.cat([converged_p, torch.tensor([task_id])])
                         
                 for i, p_id in enumerate(similar_prompt_ids):
                     prompt_curr_ind = (slice(None),slice(None),[task_id])
                     prompt_p_id = (slice(None),slice(None),[p_id])
                     
                     # mix prompts
-                    model.module.e_prompt.prompt.grad.zero_()
-                    model.module.e_prompt.prompt[prompt_p_id] = (bwd_ratio[i])*model.module.e_prompt.prompt[prompt_curr_ind] +\
-                                        (1-bwd_ratio[i])*model.module.e_prompt.prompt[prompt_p_id]
+                    prompt_ref.prompt.grad.zero_()
+                    prompt_ref.prompt[prompt_p_id] = (bwd_ratio[i])*prompt_ref.prompt[prompt_curr_ind] +\
+                                        (1-bwd_ratio[i])*prompt_ref.prompt[prompt_p_id]
                     # mix keys
-                    model.module.e_prompt.prompt_key.grad.zero_()
-                    model.module.e_prompt.prompt_key[[p_id]] = (bwd_ratio[i])*model.module.e_prompt.prompt_key[[task_id]] +\
-                                        (1-bwd_ratio[i])*model.module.e_prompt.prompt_key[[p_id]]
+                    prompt_ref.prompt_key.grad.zero_()
+                    prompt_ref.prompt_key[[p_id]] = (bwd_ratio[i])*prompt_ref.prompt_key[[task_id]] +\
+                                        (1-bwd_ratio[i])*prompt_ref.prompt_key[[p_id]]
     
     else:
         converge_hist = dict()
@@ -1366,3 +1371,11 @@ def remove_duplicates(predictions, counts):
             preds.remove(_) 
     
     return np.array(predictions)[uniq_preds], uniq_preds, agg_cnts
+
+def get_model_ref(model, args):
+    """Get the correct model reference based on distributed setting"""
+    return model.module if args.distributed else model
+
+def get_prompt_ref(model, args):
+    """Get the correct e_prompt reference based on distributed setting"""
+    return model.module.e_prompt if args.distributed else model.e_prompt

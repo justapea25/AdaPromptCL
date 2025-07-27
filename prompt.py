@@ -395,9 +395,13 @@ class EPrompt(nn.Module):
                             idx = torch.from_numpy(idx).unsqueeze(-1) # (B,top_k=1)
                             print('mixed ids of mergable prompts', idx[0])
                         else: # uni or spcf
-                            idx = self.converged_p[prompt_mask].long() # task_ids -> prompt_ids: (B,top_k=1)
+                            # Ensure both tensors are on the same device
+                            converged_p_device = self.converged_p.to(prompt_mask.device)
+                            idx = converged_p_device[prompt_mask].long() # task_ids -> prompt_ids: (B,top_k=1)
                     else:
-                        idx = self.converged_p[prompt_mask].long() # task_ids -> prompt_ids: (B,top_k=1)
+                        # Ensure both tensors are on the same device
+                        converged_p_device = self.converged_p.to(prompt_mask.device)
+                        idx = converged_p_device[prompt_mask].long() # task_ids -> prompt_ids: (B,top_k=1)
                 # print('idx', idx[0])
             
             if (self.keep_prompt_freq) and (not self.feat_prompt): # update self.freq_dict_curr

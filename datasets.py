@@ -1,4 +1,3 @@
-# ------------------------------------------
 # Copyright (c) 2015-present, Facebook, Inc.
 # All rights reserved.
 # ------------------------------------------
@@ -40,25 +39,32 @@ def build_continual_dataloader(args):
 
     if args.dataset.startswith('Split-'):
         dataset_train, dataset_val = get_dataset(args.dataset.replace('Split-',''), transform_train, transform_val, args)
-
         args.nb_classes = len(dataset_val.classes)
-
         splited_dataset, class_mask = split_single_dataset(dataset_train, dataset_val, args)
+        
     elif args.dataset == 'Deepfake':
-        # Handle Deepfake as a single dataset with multiple tasks
+        # Handle Deepfake like Split- dataset - it has pre-defined class structure
         dataset_train, dataset_val = get_dataset(args.dataset, transform_train, transform_val, args)
+        args.nb_classes = len(dataset_val.classes)  # This will be 4 (2 tasks × 2 classes)
+        print(f"Deepfake nb_classes fixed at: {args.nb_classes}")
         
-        args.nb_classes = len(dataset_val.classes)
-        print(f"Deepfake dataset - Total classes: {args.nb_classes}")
+        # Create task-specific datasets for the main loop
+        splited_dataset = []
+        class_mask = [] if args.task_inc or args.train_mask else None
         
-        # For Deepfake, we don't split the dataset since it's already organized by tasks internally
-        # Each task has 2 classes (real, fake), so for 2 tasks we have 4 classes total
-        splited_dataset = [(dataset_train, dataset_val) for _ in range(args.num_tasks)]
-        
-        # Create class mask for Deepfake: each task gets 2 classes (real=2*task_id, fake=2*task_id+1)
-        class_mask = []
-        for task_id in range(args.num_tasks):
-            class_mask.append([2 * task_id, 2 * task_id + 1])
+        for i in range(args.num_tasks):
+            current_task = args.deepfake_tasks[i] if hasattr(args, 'deepfake_tasks') and len(args.deepfake_tasks) > i else None
+            current_task_list = [current_task] if current_task else None
+            
+            # Create single-task datasets
+            task_train = Deepfake(args.data_path, train=True, transform=transform_train, selected_tasks=current_task_list)
+            task_val = Deepfake(args.data_path, train=False, transform=transform_val, selected_tasks=current_task_list)
+            splited_dataset.append((task_train, task_val))
+            
+            # Fixed class mask: each task has classes [2*i, 2*i+1]
+            if class_mask is not None:
+                class_mask.append([2*i, 2*i+1])
+                
     else:
         if args.dataset == '5-datasets':
             dataset_list = ['SVHN', 'MNIST', 'CIFAR10', 'NotMNIST', 'FashionMNIST']
@@ -153,33 +159,13 @@ def build_continual_dataloader(args):
     datasets = []
     
     for i in range(args.num_tasks):
-        if args.dataset.startswith('Split-'):
+        if args.dataset.startswith('Split-') or args.dataset == 'Deepfake':
             dataset_train, dataset_val = splited_dataset[i]
-        elif args.dataset == 'Deepfake':
-            # For Deepfake, create task-specific datasets by selecting only the current task
-            current_task = args.deepfake_tasks[i] if hasattr(args, 'deepfake_tasks') and len(args.deepfake_tasks) > i else None
-            current_task_list = [current_task] if current_task else None
+            # CRITICAL: Don't modify nb_classes for Split- or Deepfake datasets
+            # They already have the correct class structure
             
-            # Create dataset with only the current task
-            dataset_train = Deepfake(args.data_path, train=True, transform=transform_train, selected_tasks=current_task_list)
-            dataset_val = Deepfake(args.data_path, train=False, transform=transform_val, selected_tasks=current_task_list)
-            
-            transform_target = Lambda(target_transform, args.nb_classes)
-
-            if class_mask is not None:
-                # For Deepfake, each task has 2 classes (real, fake)
-                exposed_cls = [2*i, 2*i+1]  # real and fake for current task
-                class_mask.append([cls + args.nb_classes for cls in range(len(exposed_cls))])
-                args.nb_classes += len(exposed_cls)
-                print('args.nb_classes', args.nb_classes)
-                
-            if not args.task_inc:
-                dataset_train.target_transform = transform_target
-                dataset_val.target_transform = transform_target
-
         else:
             dataset_train, dataset_val = get_dataset(dataset_list[i], transform_train, transform_val, args)
-
             transform_target = Lambda(target_transform, args.nb_classes)
 
             if class_mask is not None:
@@ -189,10 +175,10 @@ def build_continual_dataloader(args):
                 else:
                     exposed_cls = dataset_train.classes
                 class_mask.append([i + args.nb_classes for i in range(len(exposed_cls))])
-                args.nb_classes += len(exposed_cls)
+                args.nb_classes += len(exposed_cls)  # Only modify for multi-dataset scenarios
                 print('args.nb_classes', args.nb_classes)
                 
-            if not args.task_inc: # set to true
+            if not args.task_inc:
                 dataset_train.target_transform = transform_target
                 dataset_val.target_transform = transform_target
         
