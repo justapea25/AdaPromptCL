@@ -781,3 +781,105 @@ class VTAB(datasets.ImageFolder):
                     self.samples.append((os.path.join(root,img_name), label))
                     self.classes.add(label)
                     
+
+class Deepfake(torch.utils.data.Dataset):
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False, selected_tasks=None):        
+        self.root = os.path.expanduser(root)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.train = train
+        self.selected_tasks = selected_tasks
+        
+        self.split = 'train' if train else 'test'
+        self.data = []
+        self.targets = []
+        
+        # Load data
+        self._load_data()
+        
+        # Convert to tensor for consistency
+        self.targets = torch.LongTensor(self.targets)
+        
+        # Create classes list for compatibility
+        self.classes = []
+        for task_id, task_name in enumerate(self.task_names):
+            self.classes.extend([f"{task_name}_real", f"{task_name}_fake"])
+    
+    def _load_data(self):
+        """Load data for selected tasks"""
+        fpath = os.path.join(self.root, self.split)
+        
+        if not os.path.exists(fpath):
+            raise RuntimeError(f"Dataset path {fpath} not found.")
+        
+        # Get available tasks
+        all_tasks = [d for d in os.listdir(fpath) 
+                    if os.path.isdir(os.path.join(fpath, d))]
+        all_tasks.sort()
+        
+        # Filter to selected tasks
+        if self.selected_tasks:
+            self.task_names = [t for t in all_tasks if t in self.selected_tasks]
+            missing = [t for t in self.selected_tasks if t not in all_tasks]
+            if missing:
+                raise RuntimeError(f"Tasks not found: {missing}. Available: {all_tasks}")
+        else:
+            self.task_names = all_tasks
+            
+        print(f"Available tasks: {all_tasks}")
+        print(f"Using tasks: {self.task_names}")
+        
+        # Load data for each task
+        for task_id, task_name in enumerate(self.task_names):
+            self._load_task_data(task_id, task_name)
+    
+    def _load_task_data(self, task_id, task_name):
+        """Load data for a specific task"""
+        task_path = os.path.join(self.root, self.split, task_name)
+        real_count = 0
+        fake_count = 0
+        
+        # Load real images (label = 2 * task_id)
+        real_path = os.path.join(task_path, 'real')
+        if os.path.exists(real_path):
+            for img_name in os.listdir(real_path):
+                if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                    self.data.append(os.path.join(real_path, img_name))
+                    self.targets.append(2 * task_id)  # Real class for this task
+                    real_count += 1
+        
+        # Load fake images (label = 2 * task_id + 1)  
+        fake_path = os.path.join(task_path, 'fake')
+        if os.path.exists(fake_path):
+            for img_name in os.listdir(fake_path):
+                if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                    self.data.append(os.path.join(fake_path, img_name))
+                    self.targets.append(2 * task_id + 1)  # Fake class for this task
+                    fake_count += 1
+                    
+        print(f"[{task_name}] {self.split} split - Real: {real_count}, Fake: {fake_count}")
+    
+    def __getitem__(self, index):
+        path = self.data[index]
+        target = self.targets[index]
+        
+        # Load image
+        try:
+            from PIL import Image
+            img = Image.open(path).convert('RGB')
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            # Fallback to black image
+            img = Image.new('RGB', (224, 224), (0, 0, 0))
+        
+        if self.transform is not None:
+            img = self.transform(img)
+            
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+            
+        return img, target
+    
+    def __len__(self):
+        return len(self.data)
+                    

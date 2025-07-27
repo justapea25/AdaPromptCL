@@ -44,6 +44,21 @@ def build_continual_dataloader(args):
         args.nb_classes = len(dataset_val.classes)
 
         splited_dataset, class_mask = split_single_dataset(dataset_train, dataset_val, args)
+    elif args.dataset == 'Deepfake':
+        # Handle Deepfake as a single dataset with multiple tasks
+        dataset_train, dataset_val = get_dataset(args.dataset, transform_train, transform_val, args)
+        
+        args.nb_classes = len(dataset_val.classes)
+        print(f"Deepfake dataset - Total classes: {args.nb_classes}")
+        
+        # For Deepfake, we don't split the dataset since it's already organized by tasks internally
+        # Each task has 2 classes (real, fake), so for 2 tasks we have 4 classes total
+        splited_dataset = [(dataset_train, dataset_val) for _ in range(args.num_tasks)]
+        
+        # Create class mask for Deepfake: each task gets 2 classes (real=2*task_id, fake=2*task_id+1)
+        class_mask = []
+        for task_id in range(args.num_tasks):
+            class_mask.append([2 * task_id, 2 * task_id + 1])
     else:
         if args.dataset == '5-datasets':
             dataset_list = ['SVHN', 'MNIST', 'CIFAR10', 'NotMNIST', 'FashionMNIST']
@@ -140,6 +155,27 @@ def build_continual_dataloader(args):
     for i in range(args.num_tasks):
         if args.dataset.startswith('Split-'):
             dataset_train, dataset_val = splited_dataset[i]
+        elif args.dataset == 'Deepfake':
+            # For Deepfake, create task-specific datasets by selecting only the current task
+            current_task = args.deepfake_tasks[i] if hasattr(args, 'deepfake_tasks') and len(args.deepfake_tasks) > i else None
+            current_task_list = [current_task] if current_task else None
+            
+            # Create dataset with only the current task
+            dataset_train = Deepfake(args.data_path, train=True, transform=transform_train, selected_tasks=current_task_list)
+            dataset_val = Deepfake(args.data_path, train=False, transform=transform_val, selected_tasks=current_task_list)
+            
+            transform_target = Lambda(target_transform, args.nb_classes)
+
+            if class_mask is not None:
+                # For Deepfake, each task has 2 classes (real, fake)
+                exposed_cls = [2*i, 2*i+1]  # real and fake for current task
+                class_mask.append([cls + args.nb_classes for cls in range(len(exposed_cls))])
+                args.nb_classes += len(exposed_cls)
+                print('args.nb_classes', args.nb_classes)
+                
+            if not args.task_inc:
+                dataset_train.target_transform = transform_target
+                dataset_val.target_transform = transform_target
 
         else:
             dataset_train, dataset_val = get_dataset(dataset_list[i], transform_train, transform_val, args)
@@ -437,6 +473,18 @@ def get_dataset(dataset, transform_train, transform_val, args,):
                 noisy_labels=args.noisy_labels).data
         dataset_val = Imagenet_R(args.data_path, train=False, download=True, transform=transform_val).data
     
+    elif dataset == 'Deepfake':
+        # Pass task selection from args if available
+        selected_tasks = getattr(args, 'deepfake_tasks', None)
+        
+        # Validate that num_tasks matches selected tasks
+        if selected_tasks and len(selected_tasks) != args.num_tasks:
+            raise ValueError(f"Number of selected deepfake tasks ({len(selected_tasks)}) must match num_tasks ({args.num_tasks}). "
+                           f"Selected tasks: {selected_tasks}")
+        
+        dataset_train = Deepfake(args.data_path, train=True, download=True, transform=transform_train, selected_tasks=selected_tasks)
+        dataset_val = Deepfake(args.data_path, train=False, download=True, transform=transform_val, selected_tasks=selected_tasks)
+    
     else:
         raise ValueError('Dataset {} not found.'.format(dataset))
     
@@ -448,48 +496,43 @@ def contaminate(dataset_train, shuffled_labels,classes_per_task,args):
     for i in range(args.nb_classes):
         transition_matrix.append([])
         for j in range(args.nb_classes):
-            transition_matrix[i].append(0.0)
+            transition_matrix[i].append(0)
+    
+    # compute_transition_matrix
+    for i in range(args.nb_classes):
+        for j in range(classes_per_task):
+            transition_matrix[i][shuffled_labels[i]] += 1 / classes_per_task 
+            
+    print('transition_matrix') 
+    print(transition_matrix)
 
-    if args.in_task_noise:
-        for _ in range(args.num_tasks):
-            scope = shuffled_labels[:classes_per_task]
-            shuffled_labels = shuffled_labels[classes_per_task:]
+    def multiclass_noisify(y, P, random_state=0):
+        # row stochastic matrix
+        P /= P.sum(axis=1, keepdims=True)
+        assert P.shape == (args.nb_classes, args.nb_classes)
+        assert np.allclose(P.sum(axis=1), 1, rtol=1e-1)
+        assert (P >= 0.0).all()
 
-            if args.noisy_labels_type == "symmetry":
-                for i in range(classes_per_task):
-                    for j in range(classes_per_task):
-                        if i == j:
-                            transition_matrix[scope[i]][scope[j]] = 1.0 - args.noisy_labels_rate
-                        else:
-                            transition_matrix[scope[i]][scope[j]] = args.noisy_labels_rate / float(classes_per_task - 1)
-                            
-            elif args.noisy_labels_type == "pair":
-                for i in range(classes_per_task):
-                    transition_matrix[scope[i]][(scope[(i+1)%classes_per_task]) ] = args.noisy_labels_rate
-                    for j in range(classes_per_task):
-                        if i == j:
-                            transition_matrix[scope[i]][scope[j]] = 1.0 - args.noisy_labels_rate
-    else: # noise from out of task distribution, e.g., OOD
-        if args.noisy_labels_type == "symmetry":
-            for i in range(args.nb_classes):
-                for j in range(args.nb_classes):
-                    if i == j:
-                        transition_matrix[i][j] = 1.0 - args.noisy_labels_rate
-                    else:
-                        transition_matrix[i][j] = args.noisy_labels_rate / float(args.nb_classes - 1)
-        elif args.noisy_labels_type == "pair":
-            for i in range(args.nb_classes):
-                transition_matrix[i][(i + 1) % args.nb_classes] = args.noisy_labels_rate
-                for j in range(args.nb_classes):
-                    if i == j:
-                        transition_matrix[i][j] = 1.0 - args.noisy_labels_rate
+        m = y.shape[0]
+        new_y = y.copy()
+        flipper = np.random.RandomState(random_state)
 
-    # get_label_noise
-    dataset_train.original_targets = deepcopy(dataset_train.targets)
-    for trg_i, trg in enumerate(dataset_train.targets):
-        noisy_label = np.random.choice(args.nb_classes, 1,\
-                True, p=transition_matrix[trg])[0]
-        dataset_train.targets[trg_i] = noisy_label
+        for idx in np.arange(m):
+            i = y[idx]
+            # draw a vector with only an 1
+            flipped = flipper.multinomial(1, P[i, :], 1)[0]
+            new_y[idx] = np.where(flipped == 1)[0]
+
+        return new_y
+
+    P = np.array(transition_matrix, dtype=np.float32)
+    print('P', P)
+    dataset_train.targets = multiclass_noisify(np.array(dataset_train.targets),
+                                P=P,
+                                random_state=args.seed)
+    dataset_train.targets = dataset_train.targets.tolist()
+    
+    return dataset_train
 
 
 def split_single_dataset(dataset_train, dataset_val, args):

@@ -42,6 +42,22 @@ from sklearn.cluster import KMeans
 import networkx as net
 
 
+def accuracy_binary(y_pred, y_true, class_num=2):
+    """
+    Binary accuracy function for deepfake evaluation.
+    Converts multi-class labels to binary (even=real, odd=fake) and computes accuracy.
+    
+    Args:
+        y_pred: predicted labels
+        y_true: true labels  
+        class_num: number of classes per task (2 for real/fake)
+        
+    Returns:
+        accuracy as percentage
+    """
+    assert len(y_pred) == len(y_true), 'Data length error.'
+    return np.around((y_pred % class_num == y_true % class_num).sum() * 100 / len(y_true), decimals=2)
+
 
 def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module, 
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -133,7 +149,16 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
                 if args.pull_constraint and 'reduce_sim' in output: # if not (feat_prompt or coda_prompt)
                     loss = loss - args.pull_constraint_coeff * output['reduce_sim']
                 
-                acc1, acc5 = accuracy(logits, target, topk=(1, 5))
+                # Use binary accuracy for deepfake datasets
+                if getattr(args, 'binary_evaluation', False) and 'Deepfake' in args.dataset:
+                    # For binary evaluation, convert logits to predictions and compute binary accuracy
+                    y_pred = torch.argmax(logits, dim=1).cpu().numpy()
+                    y_true = target.cpu().numpy()
+                    acc1_val = accuracy_binary(y_pred, y_true, class_num=getattr(args, 'class_num_binary', 2))
+                    acc5_val = acc1_val  # Set acc5 same as acc1 for binary tasks
+                    acc1, acc5 = torch.tensor([acc1_val]), torch.tensor([acc5_val])
+                else:
+                    acc1, acc5 = accuracy(logits, target, topk=(1, 5))
 
             if not math.isfinite(loss.item()):
                 print("Loss is {}, stopping training".format(loss.item()))
@@ -216,8 +241,8 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
             output = model(input, task_id=task_id, cls_features=cls_features, clip_emb=clip_emb,)
             logits = output['logits']
 
-
-            if args.task_inc and class_mask is not None:
+            # Disable class masking for deepfake binary evaluation
+            if args.task_inc and class_mask is not None and not (getattr(args, 'binary_evaluation', False) and 'Deepfake' in args.dataset):
                 #adding mask to output logits
                 mask = class_mask[task_id]
                 logits_mask = torch.ones_like(logits, device=device) * float('-inf')
@@ -225,7 +250,17 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
                 logits = logits + logits_mask
 
             loss = criterion(logits, target)
-            acc1, acc5 = accuracy(logits, target, topk=(1, 5))
+            
+            # Use binary accuracy for deepfake datasets
+            if getattr(args, 'binary_evaluation', False) and 'Deepfake' in args.dataset:
+                # For binary evaluation, convert logits to predictions and compute binary accuracy
+                y_pred = torch.argmax(logits, dim=1).cpu().numpy()
+                y_true = target.cpu().numpy()
+                acc1_val = accuracy_binary(y_pred, y_true, class_num=getattr(args, 'class_num_binary', 2))
+                acc5_val = acc1_val  # Set acc5 same as acc1 for binary tasks
+                acc1, acc5 = torch.tensor([acc1_val]), torch.tensor([acc5_val])
+            else:
+                acc1, acc5 = accuracy(logits, target, topk=(1, 5))
 
             # to compute recency 
             cls_inds, cls_cnts = torch.unique(torch.argmax(logits, dim=1), return_counts=True) 
@@ -497,7 +532,7 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
         ##### if uni_or_specific: temporarily save state_dict of clf-head #####
         if args.uni_or_specific:
             temp_head_params = dict()
-            for n, p in model.module.named_parameters():
+            for n, p in model_without_ddp.named_parameters():
                 if n.startswith('head'): 
                     temp_head_params[n] = deepcopy(p.detach()) # (#classes,D=768)
         ##### if uni_or_specific: temporarily save state_dict of clf-head #####
@@ -795,6 +830,9 @@ def uni_or_specific_prompts(model, optimizer, birch, postmerge_birch, task_id,
     # from torchmetrics.functional import pairwise_cosine_similarity
     from sklearn.cluster import Birch
 
+    # Helper to get the correct model reference
+    model_ref = model.module if args.distributed else model
+    
     if birch is None:
         birch = Birch(n_clusters=None, threshold=args.converge_thrh)
     if postmerge_birch is None and args.mergable_prompts :
@@ -809,7 +847,7 @@ def uni_or_specific_prompts(model, optimizer, birch, postmerge_birch, task_id,
     # at warm-up epochs!
     with torch.no_grad():    
         # 1. get similarity between prompts
-        prompts = model.module.e_prompt.prompt if args.distributed else model.e_prompt.prompt
+        prompts = model_ref.e_prompt.prompt
         _, _, num_tasks, _, _, _ = prompts.size() # num_layer, dual, num_tasks, length, heads, emb
         prompt = prompts.mean(0).mean(0).mean(1).view(num_tasks, -1)[[task_id],:] # prmp at task_id:(1,D) 
         
@@ -1057,12 +1095,11 @@ def uni_or_specific_prompts(model, optimizer, birch, postmerge_birch, task_id,
                         if len(blck) == 1: # spcf pid
                             block2pid[frozenset(blck)] = task_id # i <- task_id
                         else: # mergable pid
-                            block2pid[frozenset(blck)] = model.module.e_prompt.mergable_prompts_start_idx if args.distributed else \
-                                            model.e_prompt.mergable_prompts_start_idx
+                            block2pid[frozenset(blck)] = model_ref.e_prompt.mergable_prompts_start_idx
                             if args.distributed:
-                                model.module.e_prompt.mergable_prompts_start_idx += 1 
+                                model_ref.e_prompt.mergable_prompts_start_idx += 1 
                             else:
-                                model.e_prompt.mergable_prompts_start_idx += 1 
+                                model_ref.e_prompt.mergable_prompts_start_idx += 1 
 
                 print('block2pid', block2pid)
                 training_mergable_pids = [block2pid[frozenset(blck)] for blck in new_blocks]
@@ -1131,22 +1168,22 @@ def uni_or_specific_prompts(model, optimizer, birch, postmerge_birch, task_id,
     if uni_or_spcf is None: # => uni_or_spcf is not mergable 
         left_epochs = args.spcf_epochs if promptID_of_taskID == task_id else args.uni_epochs
         uni_or_spcf = 'spcf' if promptID_of_taskID == task_id else 'uni'
-        model.module.e_prompt.mergable_task = False
+        model_ref.e_prompt.mergable_task = False
             
         
         if args.distributed:
-            model.module.e_prompt.converged_p = torch.cat([model.module.e_prompt.converged_p,
+            model_ref.e_prompt.converged_p = torch.cat([model_ref.e_prompt.converged_p,
                                                         torch.tensor([promptID_of_taskID])])
-            reclustered_mergable_pids = model.module.e_prompt.reclustered_mergable_pids if args.mergable_prompts \
+            reclustered_mergable_pids = model_ref.e_prompt.reclustered_mergable_pids if args.mergable_prompts \
                                             else None
         else:
-            model.e_prompt.converged_p = torch.cat([model.e_prompt.converged_p, 
+            model_ref.e_prompt.converged_p = torch.cat([model_ref.e_prompt.converged_p, 
                                                     torch.tensor([promptID_of_taskID])])
-            reclustered_mergable_pids = model.e_prompt.reclustered_mergable_pids if args.mergable_prompts else None
+            reclustered_mergable_pids = model_ref.e_prompt.reclustered_mergable_pids if args.mergable_prompts else None
         
             
     else: # => uni_or_spcf = 'mergable'
-        model.module.e_prompt.mergable_task = True 
+        model_ref.e_prompt.mergable_task = True 
         if len(training_mergable_pids) > 1:
             left_epochs = min(args.mergable_epochs*len(training_mergable_pids), args.max_mergable_epochs) 
         else:
@@ -1155,22 +1192,22 @@ def uni_or_specific_prompts(model, optimizer, birch, postmerge_birch, task_id,
 
         # converged_p <- insert -1; send training_pid & reclustered_pid to e_prompt 
         if args.distributed:
-            model.module.e_prompt.converged_p = torch.cat([model.module.e_prompt.converged_p,
+            model_ref.e_prompt.converged_p = torch.cat([model_ref.e_prompt.converged_p,
                                                                 torch.tensor([-1])])
-            model.module.e_prompt.training_mergable_pids = training_mergable_pids
-            model.module.e_prompt.reclustered_mergable_pids = reclustered_mergable_pids
+            model_ref.e_prompt.training_mergable_pids = training_mergable_pids
+            model_ref.e_prompt.reclustered_mergable_pids = reclustered_mergable_pids
         else:
-            model.e_prompt.converged_p = torch.cat([model.e_prompt.converged_p, 
+            model_ref.e_prompt.converged_p = torch.cat([model_ref.e_prompt.converged_p, 
                                                             torch.tensor([-1])])
-            model.e_prompt.training_mergable_pids = training_mergable_pids
-            model.e_prompt.reclustered_mergable_pids = reclustered_mergable_pids
+            model_ref.e_prompt.training_mergable_pids = training_mergable_pids
+            model_ref.e_prompt.reclustered_mergable_pids = reclustered_mergable_pids
 
     if task_id == 0:
         left_epochs = args.left_1Tepochs # 95 
         
 
     if args.mergable_prompts: # converged_prompts for inference
-        conv_p = torch.cat( (model.module.e_prompt.converged_p[model.module.e_prompt.converged_p!=-1], 
+        conv_p = torch.cat( (model_ref.e_prompt.converged_p[model_ref.e_prompt.converged_p!=-1], 
                                 torch.tensor(reclustered_mergable_pids)) )
         conv_p = torch.unique(conv_p)
         if zero_covered: # remove 0 when 0 is already covered by `reclustered_mergable_pids`
@@ -1178,13 +1215,13 @@ def uni_or_specific_prompts(model, optimizer, birch, postmerge_birch, task_id,
         if task_id>0:
             if len(rest_tasks) > 0: # `rest_tasks`: uni or un-reduced mergable cands 
                 # include uni prompts (not mergable cands)
-                conv_p = torch.unique(torch.cat((conv_p,model.module.e_prompt.converged_p[rest_tasks])))
+                conv_p = torch.unique(torch.cat((conv_p,model_ref.e_prompt.converged_p[rest_tasks])))
                 # remove mergable cands b/c they are already considered
                 conv_p = conv_p[conv_p!=-1]
         if args.distributed:
-            model.module.e_prompt.pids4inf = conv_p
+            model_ref.e_prompt.pids4inf = conv_p
         else:
-            model.e_prompt.pids4inf = conv_p
+            model_ref.e_prompt.pids4inf = conv_p
            
     return converge_hist, warmup_prompts, birch, left_epochs, uni_or_spcf, postmerge_birch, mergable_cands, \
             mergable_prompts_info, reduce_mergable_info

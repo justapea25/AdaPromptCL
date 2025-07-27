@@ -231,6 +231,9 @@ if __name__ == '__main__':
     elif config == 'overlap_vtab_dualprompt':
         from configs.overlap_vtab_dualprompt import get_args_parser
         config_parser = subparser.add_parser('overlap_vtab_dualprompt', help='overlap VTAB DualPrompt configs')
+    elif config == 'deepfake_dualprompt':
+        from configs.deepfake_dualprompt import get_args_parser
+        config_parser = subparser.add_parser('deepfake_dualprompt', help='Deepfake DualPrompt configs')
     else:
         raise NotImplementedError
         
